@@ -59,7 +59,7 @@ func runhttpserver(port, readtimeout, writetimeout int) {
 		MaxHeaderBytes: 1 << 20,
 		Handler:        mux,
 	}
-	log.Fatal(svr.ListenAndServe(), mux)
+	log.Fatal(svr.ListenAndServe())
 }
 
 // Dump a json of metrics collected
