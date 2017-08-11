@@ -7,43 +7,75 @@ import (
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
+	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
-)
+	/*
+		"os/exec"
+	*/)
 
 // Hold the data
-var mhostport = map[string]int{}
+var mhostport = map[string]map[int]int{}
 
 // Find default network interface
 // No functions in go. Use netstat or parse proc
-func get_device() (string, error) {
-	path, err := exec.LookPath("netstat")
+func getdevice() (string, error) {
+	data, err := ioutil.ReadFile("/proc/net/route")
 	if err != nil {
 		return "", err
 	}
-	cmd, err := exec.Command(path, "-nr").Output()
-	if err != nil {
-		return "", err
-	}
-
-	var device string
-	for _, i := range strings.Split(string(cmd), "\n") {
+	var device string = ""
+	// We slacked. We should check for 0003 and take the lowest Metric field
+	// for _,i := range strings.Split(string(data),"\n") {
+	//	fields := strings.Fields(i)
+	//	if fields[3] == "0003" {
+	//
+	//		device = fields[0]
+	//		break
+	//	}
+	//}
+	mroute := make(map[string]int)
+	for _, i := range strings.Split(string(data), "\n") {
+		if len(i) == 0 {
+			continue
+		}
 		fields := strings.Fields(i)
-		if fields[0] == "0.0.0.0" {
-			device = fields[len(fields)-1]
-			break
+		if fields[3] == "0003" {
+			num, err := strconv.Atoi(fields[6])
+			if err != nil {
+				continue
+			}
+			mroute[fields[0]] = num
 		}
 	}
+	device = getsortedmin(mroute)
 	if device == "" {
-
-		return "", fmt.Errorf("No devices found")
+		return "", fmt.Errorf("Unable to determine gateway device")
 	}
 	return device, nil
+}
+
+// sort map
+func getsortedmin(r map[string]int) string {
+	type kv struct {
+		Key   string
+		Value int
+	}
+	var sorted []kv
+	for k, v := range r {
+		sorted = append(sorted, kv{k, v})
+	}
+	// Requires go 1.8
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Value > sorted[j].Value
+	})
+	return sorted[len(sorted)-1].Key
 
 }
 
@@ -75,11 +107,13 @@ func dumphandler(w http.ResponseWriter, r *http.Request) {
 // Dump a json of metrics collected, clear it
 func clearhandler(w http.ResponseWriter, r *http.Request) {
 	dumphandler(w, r)
-	mhostport = map[string]int{}
+	mhostport = map[string]map[int]int{}
 
 }
 
 func main() {
+	runtime.GOMAXPROCS(runtime.NumCPU())
+
 	var port, writetimeout, readtimeout int
 	var verbose bool
 	flag.IntVar(&port, "port", 8080, "Port for http")
@@ -88,7 +122,10 @@ func main() {
 	flag.BoolVar(&verbose, "verbose", false, "Verbose mode")
 	flag.Parse()
 
-	dev, err := get_device()
+	if verbose == true {
+		fmt.Println("Our PID: ", strconv.Itoa(os.Getpid()))
+	}
+	dev, err := getdevice()
 	if err != nil {
 		log.Fatal("Unable to get PCAP device: ", err)
 	}
@@ -126,7 +163,7 @@ func main() {
 }
 
 // Sets info
-func setpacketinfo(packet gopacket.Packet, m map[string]int) map[string]int {
+func setpacketinfo(packet gopacket.Packet, m map[string]map[int]int) map[string]map[int]int {
 	ipLayer := packet.Layer(layers.LayerTypeIPv4)
 	tcpLayer := packet.Layer(layers.LayerTypeTCP)
 	var host string
@@ -142,7 +179,19 @@ func setpacketinfo(packet gopacket.Packet, m map[string]int) map[string]int {
 		p := fmt.Sprintf("%d", tcp.DstPort)
 		port, _ = strconv.Atoi(p)
 	}
-	m[host] = port
+	m = add(m, host, port)
 
+	return m
+}
+
+// Add to multi dimensional map, copied off blog.golang.org/go-maps-in-action
+// Though they recommend struct usage
+func add(m map[string]map[int]int, host string, port int) map[string]map[int]int {
+	mm, ok := m[host]
+	if !ok {
+		mm = make(map[int]int)
+		m[host] = mm
+	}
+	mm[port]++
 	return m
 }
