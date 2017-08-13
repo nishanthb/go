@@ -11,17 +11,19 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	/*
-		"os/exec"
-	*/)
+	 */)
 
 // Hold the data
-var mhostport = map[string]map[int]int{}
+var (
+	mhostport = map[string]map[int]int{}
+	mapLock   sync.Mutex
+)
 
 // Find default network interface
 // No functions in go. Use netstat or parse proc
@@ -82,24 +84,25 @@ func getsortedmin(r map[string]int) string {
 // An http server to return stats
 func runhttpserver(port, readtimeout, writetimeout int) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/dumpmetrics", dumphandler)
-	mux.HandleFunc("/dumpandclear", clearhandler)
+	mux.HandleFunc("/dump", dumphandler)
+	mux.HandleFunc("/clear", clearhandler)
 	svr := &http.Server{
-		Addr:           ":" + strconv.Itoa(port),
-		ReadTimeout:    time.Duration(readtimeout) * time.Second,
-		WriteTimeout:   time.Duration(writetimeout) * time.Second,
-		MaxHeaderBytes: 1 << 20,
-		Handler:        mux,
+		Addr:         ":" + strconv.Itoa(port),
+		ReadTimeout:  time.Duration(readtimeout) * time.Second,
+		WriteTimeout: time.Duration(writetimeout) * time.Second,
+		IdleTimeout:  time.Duration(10) * time.Second,
+		Handler:      mux,
 	}
 	log.Fatal(svr.ListenAndServe())
 }
 
 // Dump a json of metrics collected
 func dumphandler(w http.ResponseWriter, r *http.Request) {
+	mapLock.Lock()
 	js, err := json.Marshal(mhostport)
+	mapLock.Unlock()
 	if err != nil {
-		//log.Printf("Got error: ", err)
-		fmt.Fprintf(w, "ERROR: %s", err.Error())
+		fmt.Fprintf(w, err.Error())
 	}
 	fmt.Fprintf(w, string(js))
 }
@@ -107,18 +110,19 @@ func dumphandler(w http.ResponseWriter, r *http.Request) {
 // Dump a json of metrics collected, clear it
 func clearhandler(w http.ResponseWriter, r *http.Request) {
 	dumphandler(w, r)
+	//mapLock.Lock()
 	mhostport = map[string]map[int]int{}
-
+	//mapLock.Unlock()
 }
 
 func main() {
-	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	var port, writetimeout, readtimeout int
 	var verbose bool
 	flag.IntVar(&port, "port", 8080, "Port for http")
 	flag.IntVar(&writetimeout, "writetimeout", 10, "Write timeout for http")
 	flag.IntVar(&readtimeout, "readtimeout", 10, "Read timeout for htt&p")
+	//flag.IntVar(&progtimeout, "progtimeout", 300, "Exit after this much time")
 	flag.BoolVar(&verbose, "verbose", false, "Verbose mode")
 	flag.Parse()
 
@@ -142,7 +146,8 @@ func main() {
 	// PCAP filter for dump
 	var filter string = "tcp and dst host not " + hostname
 
-	handle, err := pcap.OpenLive(dev, 0, true, 5*time.Second)
+	// Whats an ideal snaplen?
+	handle, err := pcap.OpenLive(dev, 1024, true, 5*time.Second)
 	if err != nil {
 		log.Fatal("Pcap failed: ", err)
 	}
@@ -156,9 +161,6 @@ func main() {
 
 	for packet := range packetSource.Packets() {
 		mhostport = setpacketinfo(packet, mhostport)
-		if verbose == true {
-			fmt.Printf("%#v\n", len(mhostport))
-		}
 	}
 }
 
@@ -170,12 +172,10 @@ func setpacketinfo(packet gopacket.Packet, m map[string]map[int]int) map[string]
 	var port int
 	if ipLayer != nil {
 		ip, _ := ipLayer.(*layers.IPv4)
-		//fmt.Printf("From %s to %s\n", ip.SrcIP, ip.DstIP)
 		host = fmt.Sprintf("%s", ip.DstIP)
 	}
 	if tcpLayer != nil {
 		tcp, _ := tcpLayer.(*layers.TCP)
-		//fmt.Printf("From %d to %d\n", tcp.SrcPort, tcp.DstPort)
 		p := fmt.Sprintf("%d", tcp.DstPort)
 		port, _ = strconv.Atoi(p)
 	}
@@ -187,11 +187,14 @@ func setpacketinfo(packet gopacket.Packet, m map[string]map[int]int) map[string]
 // Add to multi dimensional map, copied off blog.golang.org/go-maps-in-action
 // Though they recommend struct usage
 func add(m map[string]map[int]int, host string, port int) map[string]map[int]int {
+	//mapLock.Lock()
 	mm, ok := m[host]
 	if !ok {
 		mm = make(map[int]int)
 		m[host] = mm
 	}
-	mm[port]++
+	mm[port] = 1
+	//mm[port]++
+	//mapLock.Unlock()
 	return m
 }
