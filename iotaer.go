@@ -1,7 +1,7 @@
 package main
 
 const (
-	ewfw = iota
+	_ = iota
 	a
 	b
 	c
