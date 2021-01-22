@@ -1,30 +1,56 @@
 package main
 
 import (
-    "fmt"
-    "log"
-    "net/http"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"strconv"
+	"sync"
 )
 
-type countHandler struct {
-    count int
+type counter struct {
+	m     sync.Mutex
+	count int
 }
 
-func (c *countHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-    c.count++
-    fmt.Fprintf(w, "the count is %v", c.count)
+// http.Handler function - requires ServeHTTP
+func (c *counter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	c.m.Lock()
+	defer c.m.Unlock()
+	c.count++
+	io.WriteString(w, "count is "+strconv.Itoa(c.count))
 }
 
-// simple middleware
-func logit(next http.Handler) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        log.Printf("url is %v", r.URL.String())
-        next.ServeHTTP(w, r)
-    })
+type Logger struct {
+	l *log.Logger
 }
+
+func (l Logger) logHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		l.l.Printf("url: %s", r.URL.String())
+		next.ServeHTTP(w, r)
+	})
+}
+
 func main() {
+	mux := http.NewServeMux()
+	fh, err := os.OpenFile("logfile.txt", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		panic(err)
+	}
 
-    n := new(countHandler)
-    http.Handle("/count", logit(n))
-    log.Fatal(http.ListenAndServe("localhost:8080", nil))
+	l := log.New(fh, "logg: ", log.LstdFlags|log.LUTC|log.Lshortfile)
+	logger := new(Logger)
+	logger.l = l
+
+	ctr := new(counter)
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("404 found not")) })
+	mux.Handle("/count", logger.logHandler(ctr))
+	s := &http.Server{
+		Addr:    "localhost:8080",
+		Handler: mux,
+	}
+	log.Fatal(s.ListenAndServe())
 }
